@@ -1,0 +1,9 @@
+# Build artifacts
+.build/
+release/
+*.tar.gz
+*.sha256
+
+# Editor crud
+*.swp
+.DS_Store
