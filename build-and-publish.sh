@@ -51,14 +51,13 @@ if ! gh repo view "$REPO" >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Build the release tarball via build-release.sh
+# 2.a Build the llama-server runtime tarball via build-release.sh
 # ---------------------------------------------------------------------------
-step "2/4  build"
+step "2.a/4  llama-server build"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 chmod +x "$HERE/build-release.sh"
 "$HERE/build-release.sh"
 
-# Locate the tarball + sha256 we just produced
 TARBALL=$(ls -t "$HERE/release"/lm-link-yarn-*linux-x64-cuda12.tar.gz 2>/dev/null | head -1)
 if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
   echo "ERROR: build-release.sh ran but no tarball at $HERE/release/"
@@ -68,6 +67,48 @@ SHA256="${TARBALL}.sha256"
 NOTES="$HERE/release/README.md"
 echo "    artifact: $TARBALL"
 echo "    sha256:   $SHA256"
+
+# ---------------------------------------------------------------------------
+# 2.b Build the HasH AI Electron app (Windows EXE + Linux AppImage) via
+#     build-agents.sh. Source stays private; only built artifacts get
+#     published to AgentsRemoteBuild's public release.
+#
+#     Skipped automatically if SKIP_AGENTS=1 or the script can't find an
+#     Agents source (lets you publish a llama-server-only release if you
+#     don't want to rebuild the desktop app every time).
+# ---------------------------------------------------------------------------
+step "2.b/4  Agents Electron app build"
+if [ "${SKIP_AGENTS:-0}" = "1" ]; then
+  echo "    SKIP_AGENTS=1 — not building the desktop app this run"
+else
+  chmod +x "$HERE/build-agents.sh"
+  # If the user has a local Agents checkout on Windows (mounted at /mnt/c
+  # under WSL) we prefer it — keeps source private, no clone needed. Falls
+  # back to AGENTS_REPO clone when no local source is set.
+  if [ -z "${AGENTS_SRC:-}" ] && [ -d "/mnt/c/Users/Davet/source/repos/Agents/Frontend" ]; then
+    export AGENTS_SRC="/mnt/c/Users/Davet/source/repos/Agents"
+    echo "    using local Agents checkout (private): $AGENTS_SRC"
+  fi
+  if "$HERE/build-agents.sh"; then
+    echo "    Agents build succeeded"
+  else
+    echo "    WARNING: Agents build failed — continuing with llama-server-only release"
+    echo "             (set SKIP_AGENTS=1 to suppress this attempt next time)"
+  fi
+fi
+
+# Collect every Agents artifact that landed in release/ (.exe / .AppImage / .zip
+# for the desktop app, plus the optional latest*.yml electron-updater feeds).
+AGENTS_FILES=()
+while IFS= read -r f; do
+  AGENTS_FILES+=("$f")
+done < <(find "$HERE/release" -maxdepth 1 \( -name "*.exe" -o -name "*.AppImage" -o -name "*.dmg" -o -name "HasH*.zip" -o -name "latest*.yml" \) -type f 2>/dev/null)
+if [ "${#AGENTS_FILES[@]}" -gt 0 ]; then
+  echo "    Agents artifacts:"
+  for f in "${AGENTS_FILES[@]}"; do
+    echo "      $(basename "$f")  ($(du -h "$f" | awk '{print $1}'))"
+  done
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Pick a version tag. If VERSION isn't set, derive one from the llama.cpp
@@ -92,9 +133,14 @@ echo "    tag: $TAG"
 # 4. Publish
 # ---------------------------------------------------------------------------
 step "4/4  gh release create"
-TITLE="LM Link with YaRN — $TAG"
+TITLE="HasH AI + LM Link with YaRN — $TAG"
+
+# Upload llama-server tarball, sha256, and every Agents artifact in one go.
+RELEASE_ASSETS=("$TARBALL" "$SHA256")
+RELEASE_ASSETS+=("${AGENTS_FILES[@]}")
+
 gh release create "$TAG" \
-  "$TARBALL" "$SHA256" \
+  "${RELEASE_ASSETS[@]}" \
   --repo "$REPO" \
   --title "$TITLE" \
   --notes-file "$NOTES"
@@ -102,8 +148,19 @@ gh release create "$TAG" \
 echo
 echo "==> Released: https://github.com/$REPO/releases/tag/$TAG"
 echo
-echo "    Asset URL (used by installstart.sh and pull-on-pod.sh):"
+echo "    Runtime asset (used by installstart.sh / pull-on-pod.sh on RunPod pods):"
 echo "        https://github.com/$REPO/releases/latest/download/$(basename "$TARBALL")"
+if [ "${#AGENTS_FILES[@]}" -gt 0 ]; then
+  echo
+  echo "    Desktop app artifacts (for end users on Windows / Linux):"
+  for f in "${AGENTS_FILES[@]}"; do
+    case "$f" in
+      *.exe)      echo "        https://github.com/$REPO/releases/latest/download/$(basename "$f")  (Windows installer)" ;;
+      *.AppImage) echo "        https://github.com/$REPO/releases/latest/download/$(basename "$f")  (Linux AppImage)" ;;
+      *.zip)      echo "        https://github.com/$REPO/releases/latest/download/$(basename "$f")  (portable zip)" ;;
+    esac
+  done
+fi
 echo
-echo "    Pod-side one-liner to pull this build:"
-echo "        curl -fsSL https://raw.githubusercontent.com/$REPO/main/pull-on-pod.sh | bash"
+echo "    End-user one-liner install (HasH AI desktop app):"
+echo "        curl -fsSL https://raw.githubusercontent.com/$REPO/main/install-agents.sh | bash"
